@@ -114,6 +114,10 @@ std::unordered_map<std::string, RpcServer::RpcHandler<RpcServer::HandlerFunction
   { "/stop_mining", { jsonMethod<COMMAND_RPC_STOP_MINING>(&RpcServer::on_stop_mining), false } },
   { "/stop_daemon", { jsonMethod<COMMAND_RPC_STOP_DAEMON>(&RpcServer::on_stop_daemon), true } },
 
+  // dynex chip handlers
+  { "/start_dynexchip", { jsonMethod<COMMAND_RPC_START_DYNEXCHIP>(&RpcServer::on_start_dynexchip), false } },
+  { "/stop_dynexchip", { jsonMethod<COMMAND_RPC_STOP_DYNEXCHIP>(&RpcServer::on_stop_dynexchip), false } },
+
   // json rpc
   { "/json_rpc", { std::bind(&RpcServer::processJsonRpcRequest, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), true } }
 };
@@ -428,6 +432,38 @@ bool RpcServer::on_send_raw_tx(const COMMAND_RPC_SEND_RAW_TX::request& req, COMM
   return true;
 }
 
+// ----------------------------------------------------------------------------------------------------------------------
+// dynex chip handlers:
+// ----------------------------------------------------------------------------------------------------------------------
+bool RpcServer::on_start_dynexchip(const COMMAND_RPC_START_DYNEXCHIP::request& req, COMMAND_RPC_START_DYNEXCHIP::response& res) {
+  AccountPublicAddress adr;
+  if (!m_core.currency().parseAccountAddressString(req.miner_address, adr)) {
+    res.status = "Failed, wrong address";
+    return true;
+  }
+
+  //<== START DYNEXCHIP HERE WHEN INVOICED FROM WALLET COMMAND LINE
+  if (!m_core.m_dynexchip.start(adr, req.threads_count, req.dynex_minute_rate)) {
+      res.status = "Failed, Dynex chip not started";
+      return true;
+  }
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+
+bool RpcServer::on_stop_dynexchip(const COMMAND_RPC_STOP_DYNEXCHIP::request& req, COMMAND_RPC_STOP_DYNEXCHIP::response& res) {
+  //<== STOP DYNEXCHIP HERE WHEN INVOICED FROM DAEMON COMMAND LINE
+  if (!m_core.m_dynexchip.stop()) {
+    res.status = "Failed, Dynex chip not stopped";
+    return true;
+  }
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+
+// ----------------------------------------------------------------------------------------------------------------------
+// mining handlers:
+// ----------------------------------------------------------------------------------------------------------------------
 bool RpcServer::on_start_mining(const COMMAND_RPC_START_MINING::request& req, COMMAND_RPC_START_MINING::response& res) {
   AccountPublicAddress adr;
   if (!m_core.currency().parseAccountAddressString(req.miner_address, adr)) {
