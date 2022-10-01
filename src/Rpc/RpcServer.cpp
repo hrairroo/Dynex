@@ -54,6 +54,25 @@ using namespace Logging;
 using namespace Crypto;
 using namespace Common;
 
+//dm:
+namespace {
+  template <typename T>
+  static bool print_as_json(const T& obj) {
+    std::cout << CryptoNote::storeToJson(obj) << ENDL;
+    return true;
+  }
+}
+
+namespace {
+  template <typename T>
+  static std::string return_as_json(const T& obj) {
+    std::string retval;
+    retval = CryptoNote::storeToJson(obj);// << ENDL;
+    return retval;
+  }
+}
+//---
+
 namespace CryptoNote {
 
 namespace {
@@ -166,7 +185,9 @@ bool RpcServer::processJsonRpcRequest(const HttpRequest& request, HttpResponse& 
       { "submitblock", { makeMemberMethod(&RpcServer::on_submitblock), false } },
       { "getlastblockheader", { makeMemberMethod(&RpcServer::on_get_last_block_header), false } },
       { "getblockheaderbyhash", { makeMemberMethod(&RpcServer::on_get_block_header_by_hash), false } },
-      { "getblockheaderbyheight", { makeMemberMethod(&RpcServer::on_get_block_header_by_height), false } }
+      { "getblockheaderbyheight", { makeMemberMethod(&RpcServer::on_get_block_header_by_height), false } },
+      { "getblock", { makeMemberMethod(&RpcServer::on_get_block), true } }, //dm
+      { "gettransaction", { makeMemberMethod(&RpcServer::on_get_transaction), true } }, //dm
     };
 
     auto it = jsonRpcHandlers.find(jsonRequest.getMethod());
@@ -705,6 +726,86 @@ bool RpcServer::on_get_block_header_by_height(const COMMAND_RPC_GET_BLOCK_HEADER
   res.status = CORE_RPC_STATUS_OK;
   return true;
 }
+
+// dm: new function get_block
+bool RpcServer::on_get_block(const COMMAND_RPC_GET_BLOCK::request& req, COMMAND_RPC_GET_BLOCK::response& res) {
+
+  //std::cout << "*** DEBUG ***" << std::endl;
+
+  if (m_core.get_current_blockchain_height() <= req.height) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_TOO_BIG_HEIGHT,
+      std::string("To big height: ") + std::to_string(req.height) + ", current blockchain height = " + std::to_string(m_core.get_current_blockchain_height()) };
+  }
+
+  std::list<CryptoNote::Block> blocks;
+  m_core.get_blocks(req.height, 1, blocks);
+
+  
+  if (1 == blocks.size()) {
+    //std::cout << "block_id: " << get_block_hash(blocks.front()) << ENDL;
+    //print_as_json(blocks.front()); //prints to console of daemon
+    /*std::string block_id_s;
+    std::stringstream block_id;
+    block_id << get_block_hash(blocks.front());
+    block_id_s = block_id.str();
+    res.block_id = block_id_s;*/
+    res.block_id = get_block_hash(blocks.front());
+    //std::cout << "block_id for block " << req.height << " -> " << res.block_id << ENDL;
+
+    std::string content;
+    content = CryptoNote::storeToJson(blocks.front()); //get block info
+    //std::cout << content << ENDL;
+    res.blockinfo = content; 
+    
+  } else {
+    uint32_t current_height;
+    Crypto::Hash top_id;
+    m_core.get_blockchain_top(current_height, top_id);
+    std::cout << "block wasn't found. Current block chain height: " << current_height << ", requested: " << req.height << std::endl;
+    return false;
+  }
+  res.status = CORE_RPC_STATUS_OK;
+  
+
+  return true;
+}
+//---
+
+// dm: new function get_block
+bool RpcServer::on_get_transaction(const COMMAND_RPC_GET_TRANSACTION::request& req, COMMAND_RPC_GET_TRANSACTION::response& res) {
+
+  if (req.tx=="") {
+    std::cout << "expected: tx:<transaction hash>" << std::endl;
+    return true;
+  }
+
+  const std::string &str_hash = req.tx;
+  Crypto::Hash tx_hash;
+  if (!parse_hash256(str_hash, tx_hash)) {
+    return true;
+  }
+
+  std::vector<Crypto::Hash> tx_ids;
+  tx_ids.push_back(tx_hash);
+  std::list<CryptoNote::Transaction> txs;
+  std::list<Crypto::Hash> missed_ids;
+  m_core.getTransactions(tx_ids, txs, missed_ids, true);
+
+  if (1 == txs.size()) {
+    print_as_json(txs.front());
+    std::string content;
+    content = CryptoNote::storeToJson(txs.front()); //get block info
+    //std::cout << content << ENDL;
+    res.txinfo = content; 
+  } else {
+    std::cout << "transaction wasn't found: <" << str_hash << '>' << std::endl;
+  }
+
+  std::cout << "*** DEBUG ***" << std::endl;
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+//---
 
 
 }
