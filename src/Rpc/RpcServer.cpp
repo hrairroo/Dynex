@@ -792,7 +792,21 @@ bool RpcServer::on_get_transaction(const COMMAND_RPC_GET_TRANSACTION::request& r
   m_core.getTransactions(tx_ids, txs, missed_ids, true);
 
   if (1 == txs.size()) {
-    print_as_json(txs.front());
+    // retrieve information about block - aka #verfications, timestamp, etc:
+    Crypto::Hash res_blockid;
+    uint32_t res_blockheight;
+    m_core.getBlockContainingTx(tx_hash, res_blockid, res_blockheight);
+    uint32_t res_currentheight;
+    res_currentheight = m_core.get_current_blockchain_height();
+
+    res.height = res_blockheight;
+    res.current_height = res_currentheight;
+
+    //std::cout << "*** DEBUG: height = " << res_blockheight << std::endl;
+    //std::cout << "*** DEBUG: current height = " << res_currentheight << std::endl;
+    
+    // now the transaction itself:
+    //print_as_json(txs.front());
     std::string content;
     content = CryptoNote::storeToJson(txs.front()); //get block info
     //std::cout << content << ENDL;
@@ -801,7 +815,7 @@ bool RpcServer::on_get_transaction(const COMMAND_RPC_GET_TRANSACTION::request& r
     std::cout << "transaction wasn't found: <" << str_hash << '>' << std::endl;
   }
 
-  std::cout << "*** DEBUG ***" << std::endl;
+  //std::cout << "*** DEBUG ***" << std::endl;
   res.status = CORE_RPC_STATUS_OK;
   return true;
 }
