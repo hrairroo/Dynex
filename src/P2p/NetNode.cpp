@@ -592,7 +592,7 @@ namespace CryptoNote
     }
 
     context.version = rsp.node_data.version;
-
+    
     if (rsp.node_data.network_id != m_network_id) {
       logger(Logging::ERROR) << context << "COMMAND_HANDSHAKE Failed, wrong network!  (" << rsp.node_data.network_id << "), closing connection.";
       return false;
@@ -968,6 +968,7 @@ namespace CryptoNote
   bool NodeServer::get_local_node_data(basic_node_data& node_data)
   {
     node_data.version = P2PProtocolVersion::CURRENT;
+
     time_t local_time;
     time(&local_time);
     node_data.local_time = local_time;
