@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2022, The TuringX Project
+// Copyright (c) 2021-2022, Dynex Developers
 // 
 // All rights reserved.
 // 
@@ -26,7 +26,14 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // 
-// Parts of this file are originally copyright (c) 2012-2016 The Cryptonote developers
+// Parts of this project are originally copyright by:
+// Copyright (c) 2012-2016, The CryptoNote developers, The Bytecoin developers
+// Copyright (c) 2014-2018, The Monero project
+// Copyright (c) 2014-2018, The Forknote developers
+// Copyright (c) 2018, The TurtleCoin developers
+// Copyright (c) 2016-2018, The Karbowanec developers
+// Copyright (c) 2017-2022, The CROAT.community developers
+
 
 #include "NetNode.h"
 
@@ -145,6 +152,19 @@ namespace CryptoNote
       }
       return ss.str();
     }
+
+	std::string print_banlist_to_string(std::map<uint32_t, time_t> list) {
+	  auto now = time(nullptr);
+      std::stringstream ss;
+      ss << std::setfill('0') << std::setw(8) << std::noshowbase;
+      for (std::map<uint32_t, time_t>::const_iterator i = list.begin(); i != list.end(); ++i)
+      {
+        if (i->second > now) {
+          ss << Common::ipAddressToString(i->first) << "\t" << Common::timeIntervalToString(i->second - now) << std::endl;
+        }
+      }
+      return ss.str();
+    }
   }
 
 
@@ -218,7 +238,7 @@ namespace CryptoNote
     m_payload_handler(payload_handler),
     m_allow_local_ip(false),
     m_hide_my_port(false),
-    m_network_id(CRYPTONOTE_NETWORK),
+    m_network_id(BYTECOIN_NETWORK),
     logger(log, "node_server"),
     m_stopEvent(m_dispatcher),
     m_idleTimer(m_dispatcher),
@@ -236,14 +256,14 @@ namespace CryptoNote
     s(version, "version");
     
     if (version != 1) {
-      return;
+      throw std::runtime_error("Unsupported version");
     }
 
     s(m_peerlist, "peerlist");
     s(m_config.m_peer_id, "peer_id");
   }
 
-#define INVOKE_HANDLER(CMD, Handler) case CMD::ID: { ret = invokeAdaptor<CMD>(cmd.buf, out, ctx,  boost::bind(Handler, this, boost::placeholders::_1, boost::placeholders::_2, boost::placeholders::_3, boost::placeholders::_4)); break; }
+#define INVOKE_HANDLER(CMD, Handler) case CMD::ID: { ret = invokeAdaptor<CMD>(cmd.buf, out, ctx,  boost::bind(Handler, this, boost::placeholders::_1, boost::placeholders::_2,boost::placeholders:: _3, boost::placeholders::_4)); break; }
 
   int NodeServer::handleCommand(const LevinProtocol::Command& cmd, BinaryArray& out, P2pConnectionContext& ctx, bool& handled) {
     int ret = 0;
@@ -308,7 +328,8 @@ namespace CryptoNote
           CryptoNote::serialize(*this, a);
           loaded = true;
         }
-      } catch (std::exception&) {
+      } catch (const std::exception& e) {
+        logger(ERROR, BRIGHT_RED) << "Failed to load config from file '" << state_file_path << "': " << e.what();
       }
 
       if (!loaded) {
@@ -326,7 +347,7 @@ namespace CryptoNote
 
       m_first_connection_maker_call = true;
     } catch (const std::exception& e) {
-      logger(ERROR) << "init_config failed: " << e.what();
+      logger(ERROR, BRIGHT_RED) << "init_config failed: " << e.what();
       return false;
     }
     return true;
@@ -341,9 +362,9 @@ namespace CryptoNote
   }
 
   //----------------------------------------------------------------------------------- 
-  void NodeServer::externalRelayNotifyToAll(int command, const BinaryArray& data_buff) {
-    m_dispatcher.remoteSpawn([this, command, data_buff] {
-      relay_notify_to_all(command, data_buff, nullptr);
+  void NodeServer::externalRelayNotifyToAll(int command, const BinaryArray& data_buff, const net_connection_id* excludeConnection) {
+    m_dispatcher.remoteSpawn([this, command, data_buff, excludeConnection] {
+      relay_notify_to_all(command, data_buff, excludeConnection);
     });
   }
 
@@ -351,11 +372,91 @@ namespace CryptoNote
   bool NodeServer::make_default_config()
   {
     m_config.m_peer_id  = Crypto::rand<uint64_t>();
+    logger(INFO, BRIGHT_WHITE) << "Generated new peer ID: " << m_config.m_peer_id;
     return true;
   }
   
   //-----------------------------------------------------------------------------------
+  bool NodeServer::block_host(const uint32_t address_ip, time_t seconds)
+  {
+    m_blocked_hosts[address_ip] = time(nullptr) + seconds;
+    // drop any connection to that IP
+    forEachConnection([&](P2pConnectionContext& context) {
+      if (context.m_remote_ip == address_ip) {
+        context.m_state = CryptoNoteConnectionContext::state_shutdown;
+      }
+    });
+	logger(INFO) << "Host " << Common::ipAddressToString(address_ip) << " blocked.";
+	return true;
+  }
+  //-----------------------------------------------------------------------------------
   
+  bool NodeServer::unblock_host(const uint32_t address_ip)
+  {
+    auto i = m_blocked_hosts.find(address_ip);
+    if (i == m_blocked_hosts.end()) {
+      logger(INFO) << "Host " << Common::ipAddressToString(address_ip) << " is not blocked.";
+      return false;
+    }
+    m_blocked_hosts.erase(i);
+    logger(INFO) << "Host " << Common::ipAddressToString(address_ip) << " unblocked.";
+    return true;
+  }
+  //-----------------------------------------------------------------------------------
+
+  bool NodeServer::add_host_fail(const uint32_t address_ip)
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    uint64_t fails = ++m_host_fails_score[address_ip];
+    logger(DEBUGGING) << "Host " << Common::ipAddressToString(address_ip) << " fail score=" << fails;
+	if (fails >= P2P_IP_FAILS_BEFORE_BLOCK)
+    {
+      auto i = m_host_fails_score.find(address_ip);
+      if (i != m_host_fails_score.end()) {
+        i->second = P2P_IP_FAILS_BEFORE_BLOCK / 2;
+        block_host(address_ip);
+        return true;
+      }
+      return false;
+    }
+	return true;
+  }
+  //-----------------------------------------------------------------------------------
+
+  bool NodeServer::is_remote_host_allowed(const uint32_t address_ip)
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    auto i = m_blocked_hosts.find(address_ip);
+    if (i == m_blocked_hosts.end())
+      return true;
+    if (time(nullptr) >= i->second)
+      return unblock_host(address_ip);
+    return false;
+  }
+  //-----------------------------------------------------------------------------------
+
+  bool NodeServer::ban_host(const uint32_t address_ip, time_t seconds)
+  {
+	  std::unique_lock<std::mutex> lock(mutex);
+	  return block_host(address_ip, seconds);
+  }
+  
+  bool NodeServer::unban_host(const uint32_t address_ip)
+  {
+	  std::unique_lock<std::mutex> lock(mutex);
+	  return unblock_host(address_ip);
+  }
+  //-----------------------------------------------------------------------------------
+
+  void NodeServer::drop_connection(CryptoNoteConnectionContext& context, bool add_fail)
+  {
+    if (add_fail)
+      add_host_fail(context.m_remote_ip);
+
+    context.m_state = CryptoNoteConnectionContext::state_shutdown;
+  }
+  //-----------------------------------------------------------------------------------
+
   bool NodeServer::handle_command_line(const boost::program_options::variables_map& vm)
   {
     m_bind_ip = command_line::get_arg(vm, arg_p2p_bind_ip);
@@ -479,11 +580,15 @@ namespace CryptoNote
     //only in case if we really sure that we have external visible ip
     m_have_address = true;
     m_ip_address = 0;
+#ifdef ALLOW_DEBUG_COMMANDS
     m_last_stat_request_time = 0;
+#endif
 
     //configure self
     // m_net_server.get_config_object().m_pcommands_handler = this;
     // m_net_server.get_config_object().m_invoke_timeout = CryptoNote::P2P_DEFAULT_INVOKE_TIMEOUT;
+
+	logger(INFO) << "Network: " << m_network_id;
 
     //try to bind
     logger(INFO) << "Binding on " << m_bind_ip << ":" << m_port;
@@ -491,7 +596,7 @@ namespace CryptoNote
 
     m_listener = System::TcpListener(m_dispatcher, System::Ipv4Address(m_bind_ip), static_cast<uint16_t>(m_listeningPort));
 
-    logger(INFO, BRIGHT_GREEN) << "Net service binded on " << m_bind_ip << ":" << m_listeningPort;
+    logger(INFO, BRIGHT_GREEN) << "Net service bound on " << m_bind_ip << ":" << m_listeningPort;
 
     if(m_external_port)
       logger(INFO) << "External port defined as " << m_external_port;
@@ -518,7 +623,7 @@ namespace CryptoNote
 
     m_stopEvent.wait();
 
-    logger(INFO) << "Stopping NodeServer and it's" << m_connections.size() << " connections...";
+    logger(INFO) << "Stopping NodeServer and its " << m_connections.size() << " connections...";
     m_workingContextGroup.interrupt();
     m_workingContextGroup.wait();
 
@@ -560,7 +665,7 @@ namespace CryptoNote
       CryptoNote::serialize(*this, a);
       return true;
     } catch (const std::exception& e) {
-      logger(WARNING) << "store_config failed: " << e.what();
+      logger(TRACE) << "store_config failed: " << e.what();
     }
 
     return false;
@@ -587,19 +692,62 @@ namespace CryptoNote
     m_payload_handler.get_payload_sync_data(arg.payload_data);
 
     if (!proto.invoke(COMMAND_HANDSHAKE::ID, arg, rsp)) {
-      logger(Logging::ERROR) << context << "Failed to invoke COMMAND_HANDSHAKE, closing connection.";
+      logger(Logging::DEBUGGING) << context << "Failed to invoke COMMAND_HANDSHAKE, closing connection.";
       return false;
     }
 
     context.version = rsp.node_data.version;
-    
+
     if (rsp.node_data.network_id != m_network_id) {
-      logger(Logging::ERROR) << context << "COMMAND_HANDSHAKE Failed, wrong network!  (" << rsp.node_data.network_id << "), closing connection.";
+      logger(Logging::DEBUGGING) << context << "COMMAND_HANDSHAKE Failed, wrong network!  (" << rsp.node_data.network_id << "), closing connection.";
       return false;
     }
 
+	  // By CROAT
+      // Check for latest Daemon version
+      std::string remote_version = boost::replace_all_copy(rsp.node_data.node_version, ".", "");
+      
+      std::string remote_version_str = rsp.node_data.node_version;
+      remote_version_str.erase(std::remove(remote_version_str.begin(), remote_version_str.end(), '\n'), remote_version_str.end());          
+          
+      std::stringstream ss;
+      ss << CN_PROJECT_VERSION;
+      std::string lvs;
+      ss >> lvs;
+      
+      auto local_version = boost::replace_all_copy(lvs, ".", "");
+      auto remote_ip = Common::ipAddressToString(context.m_remote_ip);
+      std::string min_version = "200";
+      
+      // Check if is trusted node
+      if (std::find(std::begin(CryptoNote::TRUSTED_NODES), std::end(CryptoNote::TRUSTED_NODES), Common::ipAddressToString(context.m_remote_ip)) != std::end(CryptoNote::TRUSTED_NODES))
+      {
+      logger(Logging::DEBUGGING, Logging::BRIGHT_BLUE) << context << "CONNECTING TO TRUSTED NODE! - Skip version check!";      
+      } 
+      // Else Continue checking versions
+      /*
+      else 
+      {
+          if(local_version == remote_version)
+          {
+                logger(Logging::DEBUGGING, Logging::BRIGHT_GREEN)  << context <<  "GREAT!! Remote peer " << remote_ip << " are using same version!! (" << remote_version_str << ")";
+          }
+          else if(remote_version > min_version)
+          {
+                logger(Logging::DEBUGGING, Logging::BRIGHT_GREEN)  << context <<  "GREAT!! Remote peer " << remote_ip << " are using accepted version!! (" << remote_version_str << ")";
+          }
+          else if((local_version > remote_version) && (remote_version < min_version))
+          {
+              logger(DEBUGGING, Logging::BRIGHT_RED)  << context <<  "Daemon version on remote peer " << remote_ip << " is not up to date! (" << remote_version_str << ") Closing connection...";
+              return false;
+          }
+      }
+      */
+    // Continue
+    
     if (!handle_remote_peerlist(rsp.local_peerlist, rsp.node_data.local_time, context)) {
-      logger(Logging::ERROR) << context << "COMMAND_HANDSHAKE: failed to handle_remote_peerlist(...), closing connection.";
+      add_host_fail(context.m_remote_ip);
+      logger(Logging::DEBUGGING) << context << "COMMAND_HANDSHAKE: failed to handle_remote_peerlist(...), closing connection.";
       return false;
     }
 
@@ -608,7 +756,7 @@ namespace CryptoNote
     }
 
     if (!m_payload_handler.process_payload_sync_data(rsp.payload_data, context, true)) {
-      logger(Logging::ERROR) << context << "COMMAND_HANDSHAKE invoked, but process_payload_sync_data returned false, dropping connection.";
+      logger(Logging::DEBUGGING) << context << "COMMAND_HANDSHAKE invoked, but process_payload_sync_data returned false, dropping connection.";
       return false;
     }
 
@@ -648,7 +796,7 @@ namespace CryptoNote
     }
 
     if (!handle_remote_peerlist(rsp.local_peerlist, rsp.local_time, context)) {
-      logger(Logging::ERROR) << context << "COMMAND_TIMED_SYNC: failed to handle_remote_peerlist(...), closing connection.";
+      logger(Logging::DEBUGGING) << context << "COMMAND_TIMED_SYNC: failed to handle_remote_peerlist(...), closing connection.";
       return false;
     }
 
@@ -754,7 +902,7 @@ namespace CryptoNote
         });
 
         if (!handshakeContext.get()) {
-          logger(WARNING) << "Failed to HANDSHAKE with peer " << na;
+          logger(TRACE) << "Failed to HANDSHAKE with peer " << na;
           return false;
         }
       } catch (System::InterruptedException&) {
@@ -824,6 +972,10 @@ namespace CryptoNote
 
       if(is_peer_used(pe))
         continue;
+
+	  if (!is_remote_host_allowed(pe.adr.ip)) {
+		  continue;
+	  }
 
       logger(DEBUGGING) << "Selected peer: " << pe.id << " " << pe.adr << " [white=" << use_white_list
                     << "] last_seen: " << (pe.last_seen ? Common::timeIntervalToString(time(NULL) - pe.last_seen) : "never");
@@ -943,7 +1095,7 @@ namespace CryptoNote
     {
       if(be.last_seen > uint64_t(local_time))
       {
-        logger(ERROR) << "FOUND FUTURE peerlist for entry " << be.adr << " last_seen: " << be.last_seen << ", local_time(on remote node):" << local_time;
+        logger(DEBUGGING) << "FOUND FUTURE peerlist for entry " << be.adr << " last_seen: " << be.last_seen << ", local_time (on remote node):" << local_time;
         return false;
       }
       be.last_seen += delta;
@@ -968,6 +1120,8 @@ namespace CryptoNote
   bool NodeServer::get_local_node_data(basic_node_data& node_data)
   {
     node_data.version = P2PProtocolVersion::CURRENT;
+	// BY CROAT
+    node_data.node_version = CN_PROJECT_VERSION;   
 
     time_t local_time;
     time(&local_time);
@@ -1024,8 +1178,11 @@ namespace CryptoNote
     }
     rsp.connections_count = get_connections_count();
     rsp.incoming_connections_count = rsp.connections_count - get_outgoing_connections_count();
-    rsp.version = PROJECT_VERSION_LONG;
+    rsp.version = CN_PROJECT_VERSION_LONG;
     rsp.os_version = Tools::get_os_version_string();
+	// By CROAT
+    rsp.node_version = CN_PROJECT_VERSION;    
+
     m_payload_handler.get_stat_info(rsp.payload_info);
     return 1;
   }
@@ -1136,7 +1293,7 @@ namespace CryptoNote
   int NodeServer::handle_timed_sync(int command, COMMAND_TIMED_SYNC::request& arg, COMMAND_TIMED_SYNC::response& rsp, P2pConnectionContext& context)
   {
     if(!m_payload_handler.process_payload_sync_data(arg.payload_data, context, false)) {
-      logger(Logging::ERROR) << context << "Failed to process_payload_sync_data(), dropping connection";
+      logger(Logging::DEBUGGING) << context << "Failed to process_payload_sync_data(), dropping connection";
       context.m_state = CryptoNoteConnectionContext::state_shutdown;
       return 1;
     }
@@ -1154,27 +1311,77 @@ namespace CryptoNote
   {
     context.version = arg.node_data.version;
 
+	if (!is_remote_host_allowed(context.m_remote_ip)) {
+		logger(Logging::DEBUGGING) << context << "Banned node connected " << Common::ipAddressToString(context.m_remote_ip) << ", dropping connection.";
+		context.m_state = CryptoNoteConnectionContext::state_shutdown;
+		return 1;
+	}
+
     if (arg.node_data.network_id != m_network_id) {
-      //logger(Logging::INFO) << context << "WRONG NETWORK AGENT CONNECTED! id=" << arg.node_data.network_id;
-      logger(Logging::DEBUGGING) << context << "WRONG NETWORK AGENT CONNECTED! id=" << arg.node_data.network_id;
+      add_host_fail(context.m_remote_ip);
+      logger(Logging::INFO) << context << "WRONG NETWORK AGENT CONNECTED! id=" << arg.node_data.network_id;
       context.m_state = CryptoNoteConnectionContext::state_shutdown;
       return 1;
     }
 
+
+	// By DYNEX
+    //Check for latest Daemon version
+      std::string remote_version = boost::replace_all_copy(arg.node_data.node_version, ".", "");
+      
+      std::string remote_version_str = arg.node_data.node_version;
+      remote_version_str.erase(std::remove(remote_version_str.begin(), remote_version_str.end(), '\n'), remote_version_str.end());          
+          
+      std::stringstream ss;
+      ss << CN_PROJECT_VERSION;
+      std::string lvs;
+      ss >> lvs;
+      
+      auto local_version = boost::replace_all_copy(lvs, ".", "");
+      auto remote_ip = Common::ipAddressToString(context.m_remote_ip);
+      std::string min_version = "200";
+      
+      // Check if is trusted node
+      if (std::find(std::begin(CryptoNote::TRUSTED_NODES), std::end(CryptoNote::TRUSTED_NODES), Common::ipAddressToString(context.m_remote_ip)) != std::end(CryptoNote::TRUSTED_NODES))
+      {
+      logger(Logging::DEBUGGING, Logging::BRIGHT_BLUE)  << context <<  "INCOMMING TRUSTED NODE DETECTED! - Skip version check!";      
+      } 
+      // Else Continue checking versions
+      /*else 
+      {
+          if(local_version == remote_version)
+          {
+                logger(Logging::DEBUGGING, Logging::BRIGHT_GREEN)  << context <<  "GREAT!! Imcomming peer " << remote_ip << " are using same version!! (" << remote_version_str << ")";
+          }
+          else if(remote_version > min_version)
+          {
+                logger(Logging::DEBUGGING, Logging::BRIGHT_GREEN)  << context <<  "GREAT!! Imcomming peer " << remote_ip << " are using accepted version!! (" << remote_version_str << ")";
+          }
+          else if((local_version > remote_version) && (remote_version < min_version))
+          {
+              logger(DEBUGGING, Logging::BRIGHT_RED)  << context <<  "Daemon version on imcomming peer " << remote_ip << " is not up to date! (" << remote_version_str << ") Closing connection...";
+              context.m_state = CryptoNoteConnectionContext::state_shutdown;
+              return 1;
+          }
+      }*/
+	
+    // Continue
+    
     if(!context.m_is_income) {
-      logger(Logging::ERROR) << context << "COMMAND_HANDSHAKE came not from incoming connection";
+      add_host_fail(context.m_remote_ip);
+      logger(Logging::DEBUGGING) << context << "COMMAND_HANDSHAKE came not from incoming connection";
       context.m_state = CryptoNoteConnectionContext::state_shutdown;
       return 1;
     }
 
     if(context.peerId) {
-      logger(Logging::ERROR) << context << "COMMAND_HANDSHAKE came, but seems that connection already have associated peer_id (double COMMAND_HANDSHAKE?)";
+      logger(Logging::DEBUGGING) << context << "COMMAND_HANDSHAKE came, but seems that connection already have associated peer_id (double COMMAND_HANDSHAKE?)";
       context.m_state = CryptoNoteConnectionContext::state_shutdown;
       return 1;
     }
 
     if(!m_payload_handler.process_payload_sync_data(arg.payload_data, context, true))  {
-      logger(Logging::ERROR) << context << "COMMAND_HANDSHAKE came, but process_payload_sync_data returned false, dropping connection.";
+      logger(Logging::DEBUGGING) << context << "COMMAND_HANDSHAKE came, but process_payload_sync_data returned false, dropping connection.";
       context.m_state = CryptoNoteConnectionContext::state_shutdown;
       return 1;
     }
@@ -1227,6 +1434,13 @@ namespace CryptoNote
   }
   //-----------------------------------------------------------------------------------
   
+  bool NodeServer::log_banlist()
+  {
+	  logger(INFO) << "Banned nodes:" << ENDL << print_banlist_to_string(m_blocked_hosts) << ENDL;
+	  return true;
+  }
+  //-----------------------------------------------------------------------------------
+
   bool NodeServer::log_connections() {
     logger(INFO) << "Connections: \r\n" << print_connections_container() ;
     return true;
@@ -1297,7 +1511,7 @@ namespace CryptoNote
   }
 
   void NodeServer::acceptLoop() {
-    for (;;) {
+    while(!m_stop) {
       try {
         P2pConnectionContext ctx(m_dispatcher, logger.getLogger(), m_listener.accept());
         ctx.m_connection_id = boost::uuids::random_generator()();
@@ -1317,7 +1531,7 @@ namespace CryptoNote
         logger(DEBUGGING) << "acceptLoop() is interrupted";
         break;
       } catch (const std::exception& e) {
-        logger(WARNING) << "Exception in acceptLoop: " << e.what();
+        logger(TRACE) << "Exception in acceptLoop: " << e.what();
       }
     }
 
@@ -1336,7 +1550,7 @@ namespace CryptoNote
     } catch (System::InterruptedException&) {
       logger(DEBUGGING) << "onIdle() is interrupted";
     } catch (std::exception& e) {
-      logger(WARNING) << "Exception in onIdle: " << e.what();
+      logger(TRACE) << "Exception in onIdle: " << e.what();
     }
 
     logger(DEBUGGING) << "onIdle finished";
@@ -1351,7 +1565,7 @@ namespace CryptoNote
         for (auto& kv : m_connections) {
           auto& ctx = kv.second;
           if (ctx.writeDuration(now) > P2P_DEFAULT_INVOKE_TIMEOUT) {
-            logger(WARNING) << ctx << "write operation timed out, stopping connection";
+            logger(TRACE) << ctx << "write operation timed out, stopping connection";
             ctx.interrupt();
           }
         }
@@ -1359,7 +1573,7 @@ namespace CryptoNote
     } catch (System::InterruptedException&) {
       logger(DEBUGGING) << "timeoutLoop() is interrupted";
     } catch (std::exception& e) {
-      logger(WARNING) << "Exception in timeoutLoop: " << e.what();
+      logger(TRACE) << "Exception in timeoutLoop: " << e.what();
     }
   }
 
@@ -1372,7 +1586,7 @@ namespace CryptoNote
     } catch (System::InterruptedException&) {
       logger(DEBUGGING) << "timedSyncLoop() is interrupted";
     } catch (std::exception& e) {
-      logger(WARNING) << "Exception in timedSyncLoop: " << e.what();
+      logger(TRACE) << "Exception in timedSyncLoop: " << e.what();
     }
 
     logger(DEBUGGING) << "timedSyncLoop finished";
@@ -1423,7 +1637,7 @@ namespace CryptoNote
       } catch (System::InterruptedException&) {
         logger(DEBUGGING) << ctx << "connectionHandler() inner context is interrupted";
       } catch (std::exception& e) {
-        logger(WARNING) << ctx << "Exception in connectionHandler: " << e.what();
+        logger(TRACE) << ctx << "Exception in connectionHandler: " << e.what();
       }
 
       ctx.interrupt();
@@ -1476,7 +1690,7 @@ namespace CryptoNote
       // connection stopped
       logger(DEBUGGING) << ctx << "writeHandler() is interrupted";
     } catch (std::exception& e) {
-      logger(WARNING) << ctx << "error during write: " << e.what();
+      logger(TRACE) << ctx << "error during write: " << e.what();
       ctx.interrupt(); // stop connection on write error
     }
 
