@@ -149,15 +149,6 @@ std::unordered_map<std::string, RpcServer::RpcHandler<RpcServer::HandlerFunction
   { "/get_blocks_hashes_by_timestamps", { jsonMethod<COMMAND_RPC_GET_BLOCKS_HASHES_BY_TIMESTAMPS>(&RpcServer::onGetBlocksHashesByTimestamps), false } },
   { "/get_transaction_details_by_hashes", { jsonMethod<COMMAND_RPC_GET_TRANSACTIONS_DETAILS_BY_HASHES>(&RpcServer::onGetTransactionsDetailsByHashes), false } },
   { "/get_transaction_hashes_by_payment_id", { jsonMethod<COMMAND_RPC_GET_TRANSACTION_HASHES_BY_PAYMENT_ID>(&RpcServer::onGetTransactionHashesByPaymentId), false } },
-  
-  // disabled in restricted rpc mode
-  { "/start_mining", { jsonMethod<COMMAND_RPC_START_MINING>(&RpcServer::on_start_mining), false } },
-  { "/stop_mining", { jsonMethod<COMMAND_RPC_STOP_MINING>(&RpcServer::on_stop_mining), false } },
-  { "/stop_daemon", { jsonMethod<COMMAND_RPC_STOP_DAEMON>(&RpcServer::on_stop_daemon), true } },
-
-  // dynexchips:
-  { "/start_dynexchip", { jsonMethod<COMMAND_RPC_START_DYNEXCHIP>(&RpcServer::on_start_dynexchip), false } },
-  { "/stop_dynexchip", { jsonMethod<COMMAND_RPC_STOP_DYNEXCHIP>(&RpcServer::on_stop_dynexchip), false } },
 
   // json rpc
   { "/json_rpc", { std::bind(&RpcServer::processJsonRpcRequest, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), true } }
@@ -708,7 +699,7 @@ bool RpcServer::on_get_info(const COMMAND_RPC_GET_INFO::request& req, COMMAND_RP
   uint64_t sizeMedian = Common::medianValue(blocksSizes);
   uint64_t nextReward = 0;
   int64_t emissionChange = 0;
-  if (!m_core.getBlockReward(res.block_major_version, sizeMedian, 0, alreadyGeneratedCoins, 0, nextReward, emissionChange)) {
+  if (!m_core.getBlockReward(res.height, res.block_major_version, sizeMedian, 0, alreadyGeneratedCoins, 0, nextReward, emissionChange)) {
     throw JsonRpc::JsonRpcError{
       CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Internal error: can't get already generated coins for prev. block." };
   }
@@ -806,67 +797,6 @@ bool RpcServer::on_send_raw_tx(const COMMAND_RPC_SEND_RAW_TX::request& req, COMM
   r.txs.push_back(asString(tx_blob));
   m_core.get_protocol()->relay_transactions(r);
   //TODO: make sure that tx has reached other nodes here, probably wait to receive reflections from other nodes
-  res.status = CORE_RPC_STATUS_OK;
-  return true;
-}
-
-bool RpcServer::on_start_mining(const COMMAND_RPC_START_MINING::request& req, COMMAND_RPC_START_MINING::response& res) {
-  if (m_restricted_rpc) {
-	res.status = "Failed, restricted handle";
-	return false;
-  }
-  
-  AccountPublicAddress adr;
-  if (!m_core.currency().parseAccountAddressString(req.miner_address, adr)) {
-    res.status = "Failed, wrong address";
-    return true;
-  }
-
-  if (!m_core.get_miner().start(adr, static_cast<size_t>(req.threads_count))) {
-    res.status = "Failed, mining not started";
-    return true;
-  }
-
-  res.status = CORE_RPC_STATUS_OK;
-  return true;
-}
-
-bool RpcServer::on_stop_mining(const COMMAND_RPC_STOP_MINING::request& req, COMMAND_RPC_STOP_MINING::response& res) {
-  if (m_restricted_rpc) {
-	res.status = "Failed, restricted handle";
-	return false;
-  }
-
-  if (!m_core.get_miner().stop()) {
-    res.status = "Failed, mining not stopped";
-    return true;
-  }
-  res.status = CORE_RPC_STATUS_OK;
-  return true;
-}
-
-bool RpcServer::on_start_dynexchip(const COMMAND_RPC_START_DYNEXCHIP::request& req, COMMAND_RPC_START_DYNEXCHIP::response& res) {
-  AccountPublicAddress adr;
-  if (!m_core.currency().parseAccountAddressString(req.miner_address, adr)) {
-    res.status = "Failed, wrong address";
-    return true;
-  }
-
-  //<== START DYNEXCHIP HERE WHEN INVOICED FROM WALLET COMMAND LINE
-  if (!m_core.m_dynexchip.start(adr, req.threads_count, req.dynex_minute_rate)) {
-      res.status = "Failed, Dynex chip not started";
-      return true;
-  }
-  res.status = CORE_RPC_STATUS_OK;
-  return true;
-}
-
-bool RpcServer::on_stop_dynexchip(const COMMAND_RPC_STOP_DYNEXCHIP::request& req, COMMAND_RPC_STOP_DYNEXCHIP::response& res) {
-  //<== STOP DYNEXCHIP HERE WHEN INVOICED FROM DAEMON COMMAND LINE
-  if (!m_core.m_dynexchip.stop()) {
-    res.status = "Failed, Dynex chip not stopped";
-    return true;
-  }
   res.status = CORE_RPC_STATUS_OK;
   return true;
 }
@@ -1052,10 +982,10 @@ bool RpcServer::f_on_block_json(const F_COMMAND_RPC_GET_BLOCK_DETAILS::request& 
   size_t blockGrantedFullRewardZone =  CryptoNote::parameters::CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE;
   res.block.effectiveSizeMedian = std::max(res.block.sizeMedian, blockGrantedFullRewardZone);
 
-  if (!m_core.getBlockReward(res.block.major_version, res.block.sizeMedian, 0, prevBlockGeneratedCoins, 0, maxReward, emissionChange)) {
+  if (!m_core.getBlockReward(res.block.height, res.block.major_version, res.block.sizeMedian, 0, prevBlockGeneratedCoins, 0, maxReward, emissionChange)) {
     return false;
   }
-  if (!m_core.getBlockReward(res.block.major_version, res.block.sizeMedian, res.block.transactionsCumulativeSize, prevBlockGeneratedCoins, 0, currentReward, emissionChange)) {
+  if (!m_core.getBlockReward(res.block.height, res.block.major_version, res.block.sizeMedian, res.block.transactionsCumulativeSize, prevBlockGeneratedCoins, 0, currentReward, emissionChange)) {
     return false;
   }
 
@@ -1408,6 +1338,11 @@ bool RpcServer::on_get_currency_id(const COMMAND_RPC_GET_CURRENCY_ID::request& /
 }
 
 bool RpcServer::on_submitblock(const COMMAND_RPC_SUBMITBLOCK::request& req, COMMAND_RPC_SUBMITBLOCK::response& res) {
+
+  // ADD MALLOB NETWORK ID CHECK HERE
+  // TBD
+  // ...
+
   if (req.size() != 1) {
     throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Wrong param" };
   }
